@@ -11,9 +11,10 @@ const messageSchema = new mongoose.Schema({
         required: true,
         trim: true
     },
-    room: {
-        type: String,
-        default: 'general'
+    receiver: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+        required: true
     },
     createdAt: {
         type: Date,
@@ -30,7 +31,7 @@ const messageSchema = new mongoose.Schema({
 });
 
 // Index for efficient queries
-messageSchema.index({ room: 1, createdAt: -1 });
+messageSchema.index({ sender: 1, receiver: 1, createdAt: -1 });
 messageSchema.index({ sender: 1 });
 
 module.exports = mongoose.model('Message', messageSchema);

@@ -3,11 +3,11 @@ const url = require('url');
 const User = require('../model/User');
 const Message = require('../model/Message');
 
-// Store active connections: Map<WebSocket, {userId, user, rooms: Set}>
+// Store active connections: Map<WebSocket, {userId, user}>
 const clients = new Map();
 
-// Store rooms: Map<roomName, Set<WebSocket>>
-const rooms = new Map();
+// Map userId -> Set<WebSocket> (for one-to-one chats)
+const userSockets = new Map();
 
 module.exports = (wss) => {
     // Helper function to send message to a WebSocket
@@ -17,45 +17,35 @@ module.exports = (wss) => {
         }
     }
 
-    // Helper function to broadcast to all clients in a room
-    function broadcastToRoom(room, type, data, excludeWs = null) {
-        const roomClients = rooms.get(room);
-        if (roomClients) {
-            roomClients.forEach(ws => {
-                if (ws !== excludeWs && ws.readyState === 1) {
-                    ws.send(JSON.stringify({ type, data }));
-                }
-            });
+    // Helper to register a socket for a user
+    function addUserSocket(userId, ws) {
+        if (!userSockets.has(userId)) {
+            userSockets.set(userId, new Set());
+        }
+        userSockets.get(userId).add(ws);
+    }
+
+    // Helper to unregister a socket for a user
+    function removeUserSocket(userId, ws) {
+        const set = userSockets.get(userId);
+        if (!set) return;
+
+        set.delete(ws);
+        if (set.size === 0) {
+            userSockets.delete(userId);
         }
     }
 
-    // Helper function to add client to room
-    function joinRoom(ws, room) {
-        if (!rooms.has(room)) {
-            rooms.set(room, new Set());
-        }
-        rooms.get(room).add(ws);
-        
-        const client = clients.get(ws);
-        if (client) {
-            client.rooms.add(room);
-        }
-    }
+    // Helper to send an event to all sockets of a given user
+    function sendToUser(userId, type, data, excludeWs = null) {
+        const sockets = userSockets.get(userId);
+        if (!sockets) return;
 
-    // Helper function to remove client from room
-    function leaveRoom(ws, room) {
-        const roomClients = rooms.get(room);
-        if (roomClients) {
-            roomClients.delete(ws);
-            if (roomClients.size === 0) {
-                rooms.delete(room);
+        sockets.forEach(socket => {
+            if (socket !== excludeWs && socket.readyState === 1) {
+                socket.send(JSON.stringify({ type, data }));
             }
-        }
-        
-        const client = clients.get(ws);
-        if (client) {
-            client.rooms.delete(room);
-        }
+        });
     }
 
     // Handle new WebSocket connection
@@ -88,9 +78,10 @@ module.exports = (wss) => {
             // Store client information
             clients.set(ws, {
                 userId: user._id.toString(),
-                user: user,
-                rooms: new Set()
+                user: user
             });
+
+            addUserSocket(user._id.toString(), ws);
 
             console.log(`User connected: ${user.username} (${user._id})`);
 
@@ -103,10 +94,6 @@ module.exports = (wss) => {
                     email: user.email
                 }
             });
-
-            // Auto-join default room
-            joinRoom(ws, 'general');
-            sendToClient(ws, 'room_joined', { room: 'general' });
 
         } catch (error) {
             console.error('Authentication error:', error);
@@ -128,23 +115,8 @@ module.exports = (wss) => {
                 const { type, payload } = data;
 
                 switch (type) {
-                    case 'join_room':
-                        const joinRoomName = payload?.room || 'general';
-                        leaveRoom(ws, 'general'); // Leave default room if joining another
-                        joinRoom(ws, joinRoomName);
-                        console.log(`User ${client.user.username} joined room: ${joinRoomName}`);
-                        sendToClient(ws, 'room_joined', { room: joinRoomName });
-                        break;
-
-                    case 'leave_room':
-                        const leaveRoomName = payload?.room || 'general';
-                        leaveRoom(ws, leaveRoomName);
-                        console.log(`User ${client.user.username} left room: ${leaveRoomName}`);
-                        sendToClient(ws, 'room_left', { room: leaveRoomName });
-                        break;
-
                     case 'send_message':
-                        const { content, room } = payload || {};
+                        const { content, receiverId } = payload || {};
 
                         // Validate input
                         if (!content || content.trim().length === 0) {
@@ -152,19 +124,35 @@ module.exports = (wss) => {
                             return;
                         }
 
-                        const messageRoom = room || 'general';
+                        if (!receiverId) {
+                            sendToClient(ws, 'error', { message: 'Receiver ID is required for one-to-one chat' });
+                            return;
+                        }
+
+                        if (receiverId === client.userId) {
+                            sendToClient(ws, 'error', { message: 'You cannot send a message to yourself' });
+                            return;
+                        }
+
+                        // Verify that receiver exists
+                        const receiverUser = await User.findById(receiverId).select('_id username email');
+                        if (!receiverUser) {
+                            sendToClient(ws, 'error', { message: 'Receiver not found' });
+                            return;
+                        }
 
                         // Create message in database
                         const message = new Message({
                             sender: client.userId,
-                            content: content.trim(),
-                            room: messageRoom
+                            receiver: receiverId,
+                            content: content.trim()
                         });
 
                         await message.save();
 
-                        // Populate sender information
+                        // Populate sender & receiver information
                         await message.populate('sender', 'username email');
+                        await message.populate('receiver', 'username email');
 
                         // Prepare message data
                         const messageData = {
@@ -174,15 +162,22 @@ module.exports = (wss) => {
                                 username: message.sender.username,
                                 email: message.sender.email
                             },
+                            receiver: {
+                                _id: message.receiver._id,
+                                username: message.receiver.username,
+                                email: message.receiver.email
+                            },
                             content: message.content,
-                            room: message.room,
                             createdAt: message.createdAt
                         };
 
-                        // Broadcast to all clients in the room
-                        broadcastToRoom(messageRoom, 'receive_message', messageData);
+                        // Send to sender (all their sockets)
+                        sendToUser(client.userId, 'receive_message', messageData);
 
-                        console.log(`Message sent by ${client.user.username} in room ${messageRoom}`);
+                        // Send to receiver (all their sockets)
+                        sendToUser(receiverId, 'receive_message', messageData);
+
+                        console.log(`Direct message from ${client.user.username} to ${receiverUser.username}`);
                         break;
 
                     case 'delete_message':
@@ -211,29 +206,35 @@ module.exports = (wss) => {
                         messageToDelete.deletedAt = new Date();
                         await messageToDelete.save();
 
-                        // Broadcast delete event to all clients in the room
-                        broadcastToRoom(
-                            messageToDelete.room || 'general',
-                            'message_deleted',
-                            {
-                                messageId: messageToDelete._id,
-                                room: messageToDelete.room || 'general',
-                                deletedBy: client.userId
-                            }
-                        );
+                        // Notify both participants (sender and receiver)
+                        const deletePayload = {
+                            messageId: messageToDelete._id,
+                            deletedBy: client.userId
+                        };
+
+                        sendToUser(messageToDelete.sender.toString(), 'message_deleted', deletePayload);
+                        sendToUser(messageToDelete.receiver.toString(), 'message_deleted', deletePayload);
 
                         console.log(`Message ${messageId} deleted by ${client.user.username}`);
                         break;
 
                     case 'get_messages':
-                        const { room: historyRoom, limit = 50 } = payload || {};
-                        const roomName = historyRoom || 'general';
+                        const { withUserId, limit = 50 } = payload || {};
+
+                        if (!withUserId) {
+                            sendToClient(ws, 'error', { message: 'withUserId is required to load conversation history' });
+                            return;
+                        }
 
                         const messages = await Message.find({
-                            room: roomName,
-                            deletedAt: null
+                            deletedAt: null,
+                            $or: [
+                                { sender: client.userId, receiver: withUserId },
+                                { sender: withUserId, receiver: client.userId }
+                            ]
                         })
                         .populate('sender', 'username email')
+                        .populate('receiver', 'username email')
                         .sort({ createdAt: -1 })
                         .limit(parseInt(limit))
                         .lean();
@@ -242,7 +243,6 @@ module.exports = (wss) => {
                         messages.reverse();
 
                         sendToClient(ws, 'message_history', {
-                            room: roomName,
                             messages: messages
                         });
                         break;
@@ -264,12 +264,10 @@ module.exports = (wss) => {
             const client = clients.get(ws);
             if (client) {
                 console.log(`User disconnected: ${client.user.username} (${client.userId})`);
-                
-                // Remove from all rooms
-                client.rooms.forEach(room => {
-                    leaveRoom(ws, room);
-                });
-                
+
+                // Remove from userSockets map
+                removeUserSocket(client.userId, ws);
+
                 // Remove client
                 clients.delete(ws);
             }
@@ -281,9 +279,7 @@ module.exports = (wss) => {
             const client = clients.get(ws);
             if (client) {
                 clients.delete(ws);
-                client.rooms.forEach(room => {
-                    leaveRoom(ws, room);
-                });
+                removeUserSocket(client.userId, ws);
             }
         });
     });

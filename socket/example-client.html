@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -11,6 +12,7 @@
             margin: 50px auto;
             padding: 20px;
         }
+
         #messages {
             border: 1px solid #ccc;
             height: 400px;
@@ -19,73 +21,84 @@
             margin-bottom: 20px;
             background: #f9f9f9;
         }
+
         .message {
             margin-bottom: 10px;
             padding: 8px;
             background: white;
             border-radius: 4px;
         }
+
         .message-header {
             font-weight: bold;
             color: #333;
             margin-bottom: 4px;
         }
+
         .message-content {
             color: #666;
         }
+
         .message-time {
             font-size: 0.8em;
             color: #999;
         }
-        input, button {
+
+        input,
+        button {
             padding: 10px;
             margin: 5px;
         }
+
         input[type="text"] {
             width: 60%;
         }
+
         button {
             cursor: pointer;
         }
+
         #status {
             padding: 10px;
             margin-bottom: 10px;
             border-radius: 4px;
         }
+
         .connected {
             background: #d4edda;
             color: #155724;
         }
+
         .disconnected {
             background: #f8d7da;
             color: #721c24;
         }
     </style>
 </head>
+
 <body>
     <h1>WebSocket Chat Example (Native WebSocket)</h1>
-    
+
     <div id="status" class="disconnected">Disconnected</div>
-    
+
     <div>
         <input type="text" id="tokenInput" placeholder="Enter JWT Token" style="width: 100%; margin-bottom: 10px;">
         <button onclick="connect()">Connect</button>
         <button onclick="disconnect()">Disconnect</button>
     </div>
-    
+
     <div>
-        <input type="text" id="roomInput" placeholder="Room name (default: general)" style="width: 70%;">
-        <button onclick="joinRoom()">Join Room</button>
+        <input type="text" id="receiverInput" placeholder="Receiver user ID (for 1-to-1 chat)" style="width: 100%;">
     </div>
-    
+
     <div id="messages"></div>
-    
+
     <div>
         <input type="text" id="messageInput" placeholder="Type your message...">
         <button onclick="sendMessage()">Send</button>
         <button onclick="loadHistory()">Load History</button>
     </div>
-    
+
     <div>
         <input type="text" id="deleteInput" placeholder="Message ID to delete">
         <button onclick="deleteMessage()">Delete Message</button>
@@ -93,11 +106,11 @@
 
     <script>
         let ws = null;
-        let currentRoom = 'general';
+        let currentConversationUserId = null;
 
         function connect() {
             const token = document.getElementById('tokenInput').value;
-            
+
             if (!token) {
                 alert('Please enter a JWT token');
                 return;
@@ -148,17 +161,6 @@
                     if (data.user) {
                         addSystemMessage(`Logged in as: ${data.user.username}`);
                     }
-                    // Auto-join default room
-                    sendWebSocketMessage('join_room', { room: 'general' });
-                    break;
-
-                case 'room_joined':
-                    currentRoom = data.room;
-                    addSystemMessage(`Joined room: ${data.room}`);
-                    break;
-
-                case 'room_left':
-                    addSystemMessage(`Left room: ${data.room}`);
                     break;
 
                 case 'receive_message':
@@ -209,18 +211,18 @@
             }
         }
 
-        function joinRoom() {
-            const room = document.getElementById('roomInput').value || 'general';
-            sendWebSocketMessage('leave_room', { room: currentRoom });
-            sendWebSocketMessage('join_room', { room: room });
-        }
-
         function sendMessage() {
             const messageInput = document.getElementById('messageInput');
             const content = messageInput.value.trim();
-            
+            const receiverId = document.getElementById('receiverInput').value.trim();
+
             if (!content) {
                 alert('Please enter a message');
+                return;
+            }
+
+            if (!receiverId) {
+                alert('Please enter a receiver user ID');
                 return;
             }
 
@@ -229,9 +231,11 @@
                 return;
             }
 
+            currentConversationUserId = receiverId;
+
             sendWebSocketMessage('send_message', {
                 content: content,
-                room: currentRoom
+                receiverId: receiverId
             });
 
             messageInput.value = '';
@@ -239,7 +243,7 @@
 
         function deleteMessage() {
             const messageId = document.getElementById('deleteInput').value.trim();
-            
+
             if (!messageId) {
                 alert('Please enter a message ID');
                 return;
@@ -263,8 +267,16 @@
                 return;
             }
 
+            const receiverId = document.getElementById('receiverInput').value.trim();
+            if (!receiverId) {
+                alert('Please enter a receiver user ID to load conversation');
+                return;
+            }
+
+            currentConversationUserId = receiverId;
+
             sendWebSocketMessage('get_messages', {
-                room: currentRoom,
+                withUserId: receiverId,
                 limit: 50
             });
         }
@@ -274,17 +286,17 @@
             const messageDiv = document.createElement('div');
             messageDiv.className = 'message';
             messageDiv.id = `msg-${data._id}`;
-            
+
             const time = new Date(data.createdAt).toLocaleTimeString();
-            
+
             messageDiv.innerHTML = `
                 <div class="message-header">${data.sender.username || 'Unknown'}</div>
                 <div class="message-content">${data.content}</div>
                 <div class="message-time">${time}</div>
             `;
-            
+
             messagesDiv.appendChild(messageDiv);
-            
+
             if (scroll) {
                 messagesDiv.scrollTop = messagesDiv.scrollHeight;
             }
@@ -315,4 +327,5 @@
         });
     </script>
 </body>
+
 </html>
